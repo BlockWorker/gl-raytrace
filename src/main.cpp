@@ -12,14 +12,14 @@
 #include "rendering/Shader.h"
 #include "rendering/Texture.h"
 #include "rendering/Lights.h"
-#include "rendering/Sphere.h"
+#include "rendering/SceneObjects.h"
 
 GLFWwindow* window;
 int window_width  = 1024;
 int window_height = 768;
 
 const int NUM_LIGHTS = 15;
-const int NUM_SPHERES = 15;
+const int NUM_SPHERES = 10;
 
 const float PITCH_LIMIT = M_PI_2 - 1e-3f;
 const float MOUSE_SENS = 0.5f;
@@ -60,8 +60,12 @@ GLuint vboID;
 
 glm::vec4 ground_plane;
 
-PointLight pointLights[NUM_LIGHTS];
-Sphere spheres[NUM_SPHERES];
+std::vector<PointLight> pointLights;
+std::vector<Sphere> spheres;
+std::vector<Vertex> vertices;
+std::vector<Triangle> triangles;
+
+GLuint buffers[4];
 
 unsigned gen_seed = 0;
 
@@ -97,7 +101,7 @@ void update_camera()
     shader->setUniform2fv("pixel_size", glm::vec2(1.0f / window_width, 1.0f / window_height));
 }
 
-void update_lights()
+/*void update_lights()
 {
     glm::vec3 pos[NUM_LIGHTS];
     glm::vec4 color[NUM_LIGHTS];
@@ -133,6 +137,25 @@ void update_spheres()
     shader->setUniform3fv("sphere_ambient", NUM_SPHERES, ambient);
     shader->setUniform3fv("sphere_diffuse", NUM_SPHERES, diffuse);
     shader->setUniform4fv("sphere_specular", NUM_SPHERES, specular);
+}*/
+
+void update_scene()
+{
+    GLsizeiptr size = pointLights.size() * sizeof(PointLight);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffers[0]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, pointLights.data(), GL_STATIC_DRAW);
+
+    size = spheres.size() * sizeof(Sphere);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, buffers[1]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, spheres.data(), GL_STATIC_DRAW);
+
+    size = vertices.size() * sizeof(Vertex);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, buffers[2]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, vertices.data(), GL_STATIC_DRAW);
+
+    size = triangles.size() * sizeof(Triangle);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, buffers[3]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, triangles.data(), GL_STATIC_DRAW);
 }
 
 void generate_scene()
@@ -148,17 +171,35 @@ void generate_scene()
     auto randf = std::generate_canonical<float, std::numeric_limits<float>::digits, std::default_random_engine>;
     auto randfr = [=](std::default_random_engine& gen, float min, float max) { return (max - min) * randf(gen) + min; };
 
+    pointLights.clear();
+    pointLights.reserve(NUM_LIGHTS);
+    spheres.clear();
+    spheres.reserve(NUM_SPHERES);
+    vertices.clear();
+    vertices.reserve(3);
+    triangles.clear();
+    triangles.reserve(1);
+
     for (int i = 0; i < NUM_LIGHTS; i++) {
         auto pos = glm::vec3(randfr(gen, GEN_X_MIN, GEN_X_MAX), randfr(gen, GEN_Y_MIN, GEN_Y_MAX), randfr(gen, GEN_Z_MIN, GEN_Z_MAX));
         auto color = glm::vec3(randf(gen), randf(gen), randf(gen));
-        pointLights[i] = PointLight(pos, color, randfr(gen, 0.1f, 0.4f));
+        pointLights.push_back(PointLight(pos, color, randfr(gen, 0.1f, 0.4f)));
     }
 
     for (int i = 0; i < NUM_SPHERES; i++) {
         auto pos = glm::vec3(randfr(gen, GEN_X_MIN, GEN_X_MAX), randfr(gen, GEN_Y_MIN, GEN_Y_MAX), randfr(gen, GEN_Z_MIN, GEN_Z_MAX));
         auto color = glm::vec3(randf(gen), randf(gen), randf(gen));
-        spheres[i] = Sphere(pos, randfr(gen, 0.1f, 0.7f), color, randfr(gen, 10.0f, 100.0f));
+        spheres.push_back(Sphere(pos, randfr(gen, 0.1f, 0.7f), PhongCoefficients(color, randfr(gen, 10.0f, 100.0f))));
     }
+
+    glm::vec3 tnormal = glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f));
+    PhongCoefficients tcoeff1(glm::vec3(1.0f, 0.0f, 0.0f), 40.0f);
+    PhongCoefficients tcoeff2(glm::vec3(0.0f, 1.0f, 0.0f), 40.0f);
+    PhongCoefficients tcoeff3(glm::vec3(0.0f, 0.0f, 1.0f), 40.0f);
+    vertices.push_back(Vertex(glm::vec3(-1.0f, 0.0f, -4.0f), tnormal, tcoeff1));
+    vertices.push_back(Vertex(glm::vec3(0.0f, 0.0f, -5.0f), tnormal, tcoeff2));
+    vertices.push_back(Vertex(glm::vec3(-1.0f, 1.0f, -5.0f), tnormal, tcoeff3));
+    triangles.push_back(Triangle(0, 1, 2, tnormal));
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -169,8 +210,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     {
         gen_seed++;
         generate_scene();
-        update_lights();
-        update_spheres();
+        update_scene();
         std::cout << gen_seed << std::endl;
     }
     else if (key == GLFW_KEY_F4 && mods == GLFW_MOD_ALT)
@@ -236,6 +276,9 @@ int loadContent()
 {
     /* Create and apply basic shader */
     shader = new Shader("Basic.vert", "Raytrace.frag");
+    GLuint program = shader->get_program_id();
+
+    glGenBuffers(4, buffers);
     
     update_camera_direction();
     update_camera();
@@ -244,8 +287,7 @@ int loadContent()
     shader->setUniform4fv("ground_plane", ground_plane);
 
     generate_scene();
-    update_lights();
-    update_spheres();
+    update_scene();
 
     glGenVertexArrays(1, &vaoID);
     glBindVertexArray(vaoID);

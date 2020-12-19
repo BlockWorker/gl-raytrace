@@ -30,6 +30,10 @@ public:
     void setUniform4fv      (const std::string & uniformName, GLsizei count, const glm::vec4 * vectors);
     void setUniformMatrix3fv(const std::string & uniformName, const glm::mat3 & matrix);
     void setUniformMatrix4fv(const std::string & uniformName, const glm::mat4 & matrix);
+
+    GLuint get_program_id() {
+        return this->program_id;
+    }
     
     void apply();
 
