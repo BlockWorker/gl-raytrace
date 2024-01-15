@@ -13,13 +13,15 @@
 #include "rendering/Texture.h"
 #include "rendering/Lights.h"
 #include "rendering/SceneObjects.h"
+#include "rendering/Model.h"
 
 GLFWwindow* window;
 int window_width  = 1024;
 int window_height = 768;
 
-const int NUM_LIGHTS = 15;
+const int NUM_LIGHTS = 10;
 const int NUM_SPHERES = 10;
+const int NUM_TEXTURES = 20;
 
 const float PITCH_LIMIT = M_PI_2 - 1e-3f;
 const float MOUSE_SENS = 0.5f;
@@ -37,6 +39,10 @@ static const GLfloat screen_triangles[] = {
 
 Shader  * shader  = nullptr;
 Texture * texture = nullptr;
+Texture * nmap = nullptr;
+Texture * modelTex = nullptr;
+
+Model * model = nullptr;
 
 glm::vec3 cam_position = glm::vec3(0.0f, 0.0f, 0.0f);
 glm::vec3 cam_up = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -60,7 +66,7 @@ GLuint vboID;
 
 glm::vec4 ground_plane;
 
-std::vector<PointLight> pointLights;
+std::vector<Light> lights;
 std::vector<Sphere> spheres;
 std::vector<Vertex> vertices;
 std::vector<Triangle> triangles;
@@ -93,7 +99,6 @@ void update_camera()
     img_right = (view_r - view_l) * cam_u;
     img_up = (view_t - view_b) * cam_v;
 
-    shader->apply();
     shader->setUniform3fv("cam_pos", cam_position);
     shader->setUniform3fv("img_origin", img_origin);
     shader->setUniform3fv("img_right", img_right);
@@ -101,49 +106,11 @@ void update_camera()
     shader->setUniform2fv("pixel_size", glm::vec2(1.0f / window_width, 1.0f / window_height));
 }
 
-/*void update_lights()
-{
-    glm::vec3 pos[NUM_LIGHTS];
-    glm::vec4 color[NUM_LIGHTS];
-
-    for (int i = 0; i < NUM_LIGHTS; i++)
-    {
-        PointLight light = pointLights[i];
-        pos[i] = light.position;
-        color[i] = glm::vec4(light.color, light.intensity);
-    }
-
-    shader->setUniform3fv("light_positions", NUM_LIGHTS, pos);
-    shader->setUniform4fv("light_colors", NUM_LIGHTS, color);
-}
-
-void update_spheres()
-{
-    glm::vec4 definition[NUM_SPHERES];
-    glm::vec3 ambient[NUM_SPHERES];
-    glm::vec3 diffuse[NUM_SPHERES];
-    glm::vec4 specular[NUM_SPHERES];
-
-    for (int i = 0; i < NUM_SPHERES; i++)
-    {
-        Sphere sphere = spheres[i];
-        definition[i] = glm::vec4(sphere.position, sphere.radius);
-        ambient[i] = sphere.ambient;
-        diffuse[i] = sphere.diffuse;
-        specular[i] = sphere.specular;
-    }
-
-    shader->setUniform4fv("spheres", NUM_SPHERES, definition);
-    shader->setUniform3fv("sphere_ambient", NUM_SPHERES, ambient);
-    shader->setUniform3fv("sphere_diffuse", NUM_SPHERES, diffuse);
-    shader->setUniform4fv("sphere_specular", NUM_SPHERES, specular);
-}*/
-
 void update_scene()
 {
-    GLsizeiptr size = pointLights.size() * sizeof(PointLight);
+    GLsizeiptr size = lights.size() * sizeof(Light);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffers[0]);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, size, pointLights.data(), GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, lights.data(), GL_STATIC_DRAW);
 
     size = spheres.size() * sizeof(Sphere);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, buffers[1]);
@@ -156,6 +123,54 @@ void update_scene()
     size = triangles.size() * sizeof(Triangle);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, buffers[3]);
     glBufferData(GL_SHADER_STORAGE_BUFFER, size, triangles.data(), GL_STATIC_DRAW);
+}
+
+void make_triangle(unsigned vi1, unsigned vi2, unsigned vi3, const glm::vec3& normal)
+{
+    Vertex v1 = vertices[vi1];
+    Vertex v2 = vertices[vi2];
+    Vertex v3 = vertices[vi3];
+    glm::mat2 uvtrans(0.0f, 0.0f, 0.0f, 0.0f);
+    if (v1.material.normalmap >= 0 && v1.uv != v2.uv && v2.uv != v3.uv && v3.uv != v1.uv)
+    {
+        glm::vec2 b = v2.uv - v1.uv;
+        glm::vec2 c = v3.uv - v1.uv;
+        b *= glm::length(v2.position - v1.position) / glm::length(b);
+        c *= glm::length(v3.position - v1.position) / glm::length(c);
+        float det = b.x * c.y - c.x * b.y;
+        uvtrans = glm::mat2(c.y / det, -b.y / det, -c.x / det, b.x / det);
+    }
+    glm::vec3 center = (v1.position + v2.position + v3.position) / 3.0f;
+    float radius = std::max(glm::length(v1.position - center), std::max(glm::length(v2.position - center), glm::length(v3.position - center)));
+    triangles.push_back(Triangle(glm::uvec3(vi1, vi2, vi3), normal, uvtrans, glm::vec4(center, radius)));
+}
+
+void make_triangle(unsigned vi1, unsigned vi2, unsigned vi3)
+{
+    Vertex v1 = vertices[vi1];
+    Vertex v2 = vertices[vi2];
+    Vertex v3 = vertices[vi3];
+    glm::vec3 normal = glm::normalize(glm::cross(v2.position - v1.position, v3.position - v1.position));
+    make_triangle(vi1, vi2, vi3, normal);
+}
+
+void make_triangle(const Vertex& v1, const Vertex& v2, const Vertex& v3, const glm::vec3& normal)
+{
+    unsigned vertIndex = vertices.size();
+    vertices.push_back(v1);
+    vertices.push_back(v2);
+    vertices.push_back(v3);
+    make_triangle(vertIndex, vertIndex + 1, vertIndex + 2, normal);
+}
+
+void make_triangle(const Vertex& v1, const Vertex& v2, const Vertex& v3)
+{
+    unsigned vertIndex = vertices.size();
+    vertices.push_back(v1);
+    vertices.push_back(v2);
+    vertices.push_back(v3);
+    glm::vec3 normal = glm::normalize(glm::cross(v2.position - v1.position, v3.position - v1.position));
+    make_triangle(vertIndex, vertIndex + 1, vertIndex + 2, normal);
 }
 
 void generate_scene()
@@ -171,35 +186,38 @@ void generate_scene()
     auto randf = std::generate_canonical<float, std::numeric_limits<float>::digits, std::default_random_engine>;
     auto randfr = [=](std::default_random_engine& gen, float min, float max) { return (max - min) * randf(gen) + min; };
 
-    pointLights.clear();
-    pointLights.reserve(NUM_LIGHTS);
+    lights.clear();
     spheres.clear();
-    spheres.reserve(NUM_SPHERES);
     vertices.clear();
-    vertices.reserve(3);
     triangles.clear();
-    triangles.reserve(1);
 
-    for (int i = 0; i < NUM_LIGHTS; i++) {
+    /*for (int i = 0; i < NUM_LIGHTS; i++) {
         auto pos = glm::vec3(randfr(gen, GEN_X_MIN, GEN_X_MAX), randfr(gen, GEN_Y_MIN, GEN_Y_MAX), randfr(gen, GEN_Z_MIN, GEN_Z_MAX));
         auto color = glm::vec3(randf(gen), randf(gen), randf(gen));
-        pointLights.push_back(PointLight(pos, color, randfr(gen, 0.1f, 0.4f)));
-    }
+        //auto lightSphereMat = Material(glm::vec3(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), color, glm::vec3(0.0f), glm::ivec4(-1), -1, 1.0f);
+        lights.push_back(Light(0, pos, glm::vec3(0.0f), color, randfr(gen, 0.5f, 1.5f)));
+        //spheres.push_back(Sphere(pos, 0.1f, lightSphereMat));
+    }*/
 
-    for (int i = 0; i < NUM_SPHERES; i++) {
+    lights.push_back(Light(1, glm::vec3(0.0f), glm::normalize(glm::vec3(-1.0f, -3.0f, 1.0f)), glm::vec3(1.0f, 1.0f, 0.7f), 0.5f));
+
+    auto modelMat = Material(glm::vec3(1.0f), glm::vec4(1.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), glm::vec3(0.0f), glm::vec3(0.0f), glm::ivec4(2, -1, -1, -1), -1, 1.0f);
+    model->compile(vertices, triangles, modelMat, glm::mat4(glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(0.0f, 1.0f, 0.0f, 0.0f), glm::vec4(0.0f, 0.0f, 1.0f, 0.0f), glm::vec4(0.0f, 0.0f, -5.0f, 1.0f)));
+
+    /*for (int i = 0; i < NUM_SPHERES; i++) {
         auto pos = glm::vec3(randfr(gen, GEN_X_MIN, GEN_X_MAX), randfr(gen, GEN_Y_MIN, GEN_Y_MAX), randfr(gen, GEN_Z_MIN, GEN_Z_MAX));
-        auto color = glm::vec3(randf(gen), randf(gen), randf(gen));
-        spheres.push_back(Sphere(pos, randfr(gen, 0.1f, 0.7f), PhongCoefficients(color, randfr(gen, 10.0f, 100.0f))));
-    }
+        auto color = glm::vec4(randf(gen), randf(gen), randf(gen), 0.0f);
+        spheres.push_back(Sphere(pos, randfr(gen, 0.1f, 0.7f), Material(color, randfr(gen, 10.0f, 100.0f), 1.0f, -1, -1, 0.8f)));
+    }*/
 
-    glm::vec3 tnormal = glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f));
-    PhongCoefficients tcoeff1(glm::vec3(1.0f, 0.0f, 0.0f), 40.0f);
-    PhongCoefficients tcoeff2(glm::vec3(0.0f, 1.0f, 0.0f), 40.0f);
-    PhongCoefficients tcoeff3(glm::vec3(0.0f, 0.0f, 1.0f), 40.0f);
-    vertices.push_back(Vertex(glm::vec3(-1.0f, 0.0f, -4.0f), tnormal, tcoeff1));
-    vertices.push_back(Vertex(glm::vec3(0.0f, 0.0f, -5.0f), tnormal, tcoeff2));
-    vertices.push_back(Vertex(glm::vec3(-1.0f, 1.0f, -5.0f), tnormal, tcoeff3));
-    triangles.push_back(Triangle(0, 1, 2, tnormal));
+    /*glm::vec3 tnormal = glm::normalize(glm::vec3(0.0f, 0.0f, -1.0f));
+    Material tmat1(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f), 40.0f, 0.0f);
+    Material tmat2(glm::vec4(0.0f, 1.0f, 0.0f, 1.0f), 40.0f, 0.5f);
+    Material tmat3(glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), 40.0f, 1.0f);
+    Vertex v1 = Vertex(glm::vec3(0.0f, 0.0f, -5.0f), tnormal, glm::vec2(0, 0), modelMat);
+    Vertex v2 = Vertex(glm::vec3(0.0f, 1.0f, -5.0f), tnormal, glm::vec2(0, 0), modelMat);
+    Vertex v3 = Vertex(glm::vec3(1.0f, 0.0f, -5.0f), tnormal, glm::vec2(0, 0), modelMat);
+    make_triangle(v1, v2, v3, tnormal);*/
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -277,8 +295,16 @@ int loadContent()
     /* Create and apply basic shader */
     shader = new Shader("Basic.vert", "Raytrace.frag");
     GLuint program = shader->get_program_id();
+    shader->apply();
+
+    for (int i = 0; i < NUM_TEXTURES; i++)
+    {
+        shader->setUniform1i("textures[" + std::to_string(i) + "]", i);
+    }
 
     glGenBuffers(4, buffers);
+
+    model = new Model("res/models/growth chamber.obj");
     
     update_camera_direction();
     update_camera();
@@ -298,10 +324,16 @@ int loadContent()
 
     texture = new Texture();
     texture->load("res/textures/checker.png");
-    texture->bind();
+    texture->bind(0);
+    nmap = new Texture();
+    nmap->load("res/textures/normalnoise.png");
+    nmap->bind(1);
+    modelTex = new Texture();
+    modelTex->load("res/models/growth chamber.png");
+    modelTex->bind(2);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    /*glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);*/
 
     return true;
 }
@@ -376,7 +408,9 @@ void render(float time, float deltaTime)
 
     update_camera();
 
-    texture->bind();
+    texture->bind(0);
+    nmap->bind(1);
+    modelTex->bind(2);
 
     glEnableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, vboID);
@@ -427,6 +461,9 @@ int main(void)
 
     delete shader;
     delete texture;
+    delete nmap;
+    delete modelTex;
+    delete model;
 
     return 0;
 }
